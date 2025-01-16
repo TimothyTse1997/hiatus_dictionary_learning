@@ -50,9 +50,9 @@ def main_unpool_generation(
         doc_ids = batch["documentID"]
         embeds = batch["features"].to(device)
         print(embeds.shape)
-        source_contrastive = contrastive_from_embed(embeds[0])
+        source_contrastive = contrastive_from_embed(embeds)
 
-        f_x =  ae.encode(embeds[0])
+        f_x =  ae.encode(embeds)
         x_hat =  ae.decode(f_x)
 
         recon_contrastive = contrastive_from_embed(x_hat)
@@ -81,9 +81,13 @@ def main_unpool_generation(
     f3_sparse_contrastive.close()
 
 def contrastive_from_embed(embed):
-    embed_cumsum = torch.cumsum(embed_cumsum, dim=0)/(torch.arange(0, embed_cumsum.shape[0])+1).unsqueeze(-1)
+    
+    embed = embed.squeeze(0)
+    embed_cumsum = torch.cumsum(embed, dim=0)/(torch.arange(0, embed.shape[0])+1).unsqueeze(-1)
+    
     gt_embed = embed_cumsum[-1]
-    return torch.dot(embed_cumsum, gt_embed)
+    distances = 1 - CosineSimilarity()(embed_cumsum, gt_embed.unsqueeze(0))
+    return distances.squeeze(-1)
 
 if __name__ == "__main__":
     main_unpool_generation()

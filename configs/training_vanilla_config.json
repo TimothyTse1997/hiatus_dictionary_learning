@@ -1,0 +1,11 @@
+[
+    {
+        "activation_dim": 2560,
+        "dict_size": 25600,
+        "lr": 7e-5,
+        "device": "cuda",
+        "sparsity_penalty": 1,
+        "lm_name": "mistral_vanilla",
+        "layer": -1
+    }
+]

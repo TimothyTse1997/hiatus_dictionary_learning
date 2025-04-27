@@ -1,214 +1,255 @@
+def track_lines_slurm(text):
+    with open("./out.txt", 'a') as f:
+        f.write(text + "\n")
+
+from utils import *
+
+import os
 import re
 import random
 import click
 import json
+import time
 from tqdm import tqdm
 from pathlib import Path
+from typing import Any, Iterable
+import argparse
+from copy import deepcopy
+
+import psutil
+
+import numpy as np
+from scipy import sparse
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn import CosineSimilarity
 
 from torch.utils.data import DataLoader, TensorDataset, Dataset
+#from datasets import load_dataset, Dataset
 
 from dictionary_learning import AutoEncoder, GatedAutoEncoder, JumpReluAutoEncoder
-from dictionary_learning.trainers import StandardTrainer, TrainerJumpRelu, GatedSAETrainer
+from dictionary_learning.trainers import StandardTrainer, JumpReluTrainer, GatedSAETrainer
 from dictionary_learning.training import trainSAE
+from dictionary_learning.trainers.matryoshka_batch_top_k import MatryoshkaBatchTopKTrainer, MatryoshkaBatchTopKSAE
 
+import webdataset as wds
 
-def prepare_embedding_dataset(data_path):
-    all_embedding = []
+def webdataset_main(
+    configs=[],
+    data_path="/scratch/tltse/data/idiolect_embeddings/full/vectors_data/data-{00000..00297}.tar",
+    save_dir="/scratch/tltse/extra2_testing_3mill_unpool_webdataset/",
+    save_model_dir_names=[],
+    batch_size=None,
+    multi_config_parallel_training=False,
+    trainer_config={
+        "save_steps": [2000, 4000, 6000],
+        "log_steps": 600,
+        "steps": 8000,
+        "verbose": True
+    }
+):
+    assert(len(save_model_dir_names) == len(configs))
 
-    for line in tqdm(open(data_path, "r")):
-        item = json.loads(line)
-        embedding_key = "embedding" if "embedding" in item else "features"
-        embed = item[embedding_key]
-        all_embedding.append(embed)
-        if len(all_embedding) % 5000 == 0: print(f"processed {len(all_embedding)} data")
-
-    text_embedding = F.normalize(torch.tensor(all_embedding))
-    embedding_dataset = TensorDataset(text_embedding)
-    return embedding_dataset
-
-class MistralDataset(Dataset):
-    def __init__(self, data_path):
-        self.data_path = data_path
-        self.all_id, self.all_embedding = self.load_data(self.data_path)
-        return
-    
-    def __len__(self):
-        return len(self.all_id)
-
-    def load_data(self, data_path):
-        all_embedding = []
-        all_id = []
-
-        for line in tqdm(open(data_path, "r")):
-            item = json.loads(line)
-            all_embedding.append(item["features"])
-            all_id.append(item["documentID"])
-        assert(len(all_embedding) == len(all_id))
-        return all_id, all_embedding
-
-    def __getitem__(self, idx):
-        embed = torch.tensor(self.all_embedding[idx])
-        current_data = {
-            "documentID": self.all_id[idx],
-            "features": F.normalize(embed, dim=0),
-        }
-        return current_data
-
-def main():
     device = "cuda"
-    save_dir = "/scratch/tltse/checkpoints/dictionary_learning/SAE/multi_model_sparsity_test2/"
-    batch_size = 128
-    print("load dataset")
-    #embedding_dataset = prepare_embedding_dataset("/project/def-lingjzhu/tltse/official_data/english.preds.jsonl")
-    embedding_dataset = prepare_embedding_dataset("/project/def-lingjzhu/tltse/mistral_embedding.jsonl")
-    train_dataloader = DataLoader(
-        embedding_dataset, batch_size=batch_size, shuffle=True
-    )
+    if not Path(save_dir).exists():
+        Path(save_dir).mkdir()
 
+    with open(Path(save_dir) / "training_cfg.json", 'w') as f:
+        json.dump(trainer_config, f, indent=4)
+
+    print("load dataset")
+    dataset = wds.DataPipeline(
+        wds.ResampledShards(data_path),
+        wds.shuffle(10000),
+        wds.split_by_worker,
+        wds.tarfile_to_samples(),
+        wds.decode("pill"),
+        wds.to_tuple("pth"),
+        wds.batched(batch_size))
+    train_dataloader = wds.WebLoader(dataset, num_workers=6, batch_size=None)
+    
     lm_name = "mistral" 
     layer = -1
-    sparsity_penalties = [5e-1, 1e-1, 5e-2, 1e-2, 5e-3, 1e-3, 5e-4, 1e-4]
 
     # train the sparse autoencoder (SAE)
     print("start training")
-    for alpha in sparsity_penalties:
-        print(f"start training with alpha: {alpha}")
-        trainer_cfgs = [
-            {
-                "trainer": StandardTrainer,
-                "dict_class": AutoEncoder,
-                "activation_dim": 2560,
-                "dict_size": 2560*10,
-                "lr": 1e-3,
-                "device": device,
-                "l1_penalty": alpha,
-                "lm_name": lm_name + "_vanilla",
-                "layer": layer
-                #"save_steps": 1000,
-            },
-            {
-                "trainer": TrainerJumpRelu,
-                "dict_class": JumpReluAutoEncoder,
-                "activation_dim": 2560,
-                "dict_size": 2560*10,
-                "lr": 7e-5,
-                "device": device,
-                "sparsity_penalty": alpha,
-                "lm_name": lm_name + "_jump",
-                "layer": layer
-                #"save_steps": 1000,
-            },
-            {
-                "trainer": GatedSAETrainer,
-                "dict_class": GatedAutoEncoder,
-                "activation_dim": 2560,
-                "dict_size": 2560*10,
-                "lr": 5e-5,
-                "device": device,
-                "l1_penalty": alpha,
-                "lm_name": lm_name + "_gated",
-                "layer": layer
-                #"save_steps": 1000,
-            } 
-        ]
+    print("multi_config_parallel_training:", multi_config_parallel_training)
+    if multi_config_parallel_training:
         ae = trainSAE(
-            data=train_dataloader,  # you could also use another (i.e. pytorch dataloader) here instead of buffer
-            trainer_configs=trainer_cfgs, #[trainer_cfg],
-            save_steps=1000,
-            save_dir=save_dir + f"alpha_{str(alpha)}/"
+            data=train_dataloader,
+            trainer_configs=configs,
+            save_dir=save_dir + "webdataset/",
+            save_model_dir_names=save_model_dir_names,
+            **trainer_config
         )
+        return None
+    print("start seq training")
+    for cfg, model_name in zip(configs, save_model_dir_names):
+        ae = trainSAE(
+            data=train_dataloader,
+            trainer_configs=[cfg],
+            save_dir=save_dir + "webdataset/",
+            save_model_dir_names=[model_name],
+            **trainer_config
+        )
+    return None
 
-@torch.no_grad()
-def main_generation(
-    model_path = "/scratch/tltse/checkpoints/dictionary_learning/SAE/debug2/trainer_0/ae.pt",
-    output_path = [
-        "/scratch/tltse/checkpoints/dictionary_learning/SAE/debug2/eval_embed.recon.jsonl",
-        "/scratch/tltse/checkpoints/dictionary_learning/SAE/debug2/eval_embed.sparse.jsonl"
-    ],
-    model_type=AutoEncoder
-):
-    device = "cuda"
+def create_save_dir_name_from_config(config):
+    filter_config_infos = lambda x: "_".join([k + "_" + str(v) for k, v in x.items() if not isinstance(v, list)])
+    if "matryoshka" in config["lm_name"]:
+        return f"matryoshka_{filter_config_infos(config)}"
+    elif "jump" in config["lm_name"]:
+        return f"jumprelu_{filter_config_infos(config)}"
+    elif "gate" in config["lm_name"]:
+        return f"gate_{filter_config_infos(config)}"
+    elif "vanilla" in config["lm_name"]:
+        return f"vanilla_{filter_config_infos(config)}"
 
-    print("loading model")
+def load_config(config_fname, save_dir, dict_size_magifier=[], topk=[], alpha=[], steps=None):
+    with open(config_fname, 'r') as f:
+        configs = json.load(f)
+    print("loaded config from file")
+    print(str(type(configs)))
 
-    batch_size = 128
-    #print(model_path)
-    #print(model_type)
-    ae = model_type.from_pretrained(model_path)
-    _ = ae.eval()
-    _ = ae.to(device)
+    if not Path(save_dir).exists():
+        Path(save_dir).mkdir()
 
-    print("dataset")
-    data_path = "/project/def-lingjzhu/tltse/official_data/english.preds.jsonl"
-    mistral_dataset = MistralDataset(data_path)
-    mistral_dataloader = DataLoader(
-        mistral_dataset, batch_size=batch_size, shuffle=False
-    )
-    #with open(output_path, 'w', encoding='utf8') as f:
-    f1_recon, f2_sparse = (
-        open(output_path[0], 'w', encoding='utf8'), 
-        open(output_path[1], 'w', encoding='utf8'), 
-    )
+    with open(Path(save_dir) / "model_cfgs.json", 'w') as f:
+        full_model_cfg = {}
+        full_model_cfg["model_cfg"] = configs
+        full_model_cfg["hyper_parameter"] = {
+            "save_dir": save_dir,
+            "dict_size_magifier": dict_size_magifier,
+            "topk": topk,
+            "alpha": alpha,
+            "steps": steps
+        }
+        json.dump(full_model_cfg, f, indent=4)
 
-    for batch in tqdm(mistral_dataloader):
-        doc_ids = batch["documentID"]
-        embeds = batch["features"].to(device)
-        f_x =  ae.encode(embeds)
-        x_hat =  ae.decode(f_x)
+    processed_configs = []
+    save_model_dir_names = []
 
-        x_hat = x_hat.detach().cpu().numpy().tolist()
-        f_x = f_x.detach().cpu().numpy().tolist()
-        for doc_id, rep in zip(doc_ids, x_hat):
-            print(
-                json.dumps({"documentID": doc_id, "features": rep}, ensure_ascii=False),
-                file=f1_recon
-            )
-        for doc_id, rep in zip(doc_ids, f_x):
-            print(
-                json.dumps({"documentID": doc_id, "features": rep}, ensure_ascii=False),
-                file=f2_sparse
-            )
-    f1_recon.close()
-    f2_sparse.close()
+    for config in configs:
+        config['steps'] = steps
 
-def main_multi_generation():
-    save_dir = Path("/scratch/tltse/checkpoints/dictionary_learning/SAE/multi_model_sparsity_test2/")
-    all_checkpoint_paths = list(save_dir.glob("**/ae.pt"))
+        for n in [None] + dict_size_magifier:
+            if n != None:
+                config["dict_size"] = config["activation_dim"] * int(n)
 
-    for p in all_checkpoint_paths:
-        parent_path = p.parent
-        assert (parent_path / "config.json").exists()
+            if "matryoshka" in config["lm_name"]:
+                config["trainer"] = MatryoshkaBatchTopKTrainer
+                config["dict_class"] = MatryoshkaBatchTopKSAE
+            elif "jump" in config["lm_name"]:
+                config["trainer"] = JumpReluTrainer
+                config["dict_class"] = JumpReluAutoEncoder
+            elif "gate" in config["lm_name"]:
+                config["trainer"] = GatedSAETrainer
+                config["dict_class"] = GatedAutoEncoder
+            elif "vanilla" in config["lm_name"]:
+                config["trainer"] = StandardTrainer
+                config["dict_class"] = AutoEncoder
+            else:
+                raise
 
-        with open(parent_path / "config.json", 'r') as f:
-            model_config = json.load(f)["trainer"]
-        if "jump" in model_config["lm_name"]:
-            model_type = JumpReluAutoEncoder
-        elif "gate" in model_config["lm_name"]:
-            model_type = GatedAutoEncoder
-        elif "vanilla" in model_config["lm_name"]:
-            model_type = AutoEncoder
+            save_model_dir_names.append(f"base_{config['lm_name']}")
+            processed_configs.append(config)
+
+    print("complete basic")
+    print(str(len(processed_configs)))
+    hyperparameter_search_configs = deepcopy(processed_configs)
+
+    for config in processed_configs:
+        if "matryoshka" in config["lm_name"]:
+            for k in topk:
+                _config = deepcopy(config)
+                _config["k"] = int(k)
+
+                hyperparameter_search_configs.append(_config)
+                save_model_dir_names.append(f"topk_{k}_{config['lm_name']}")
+                #save_model_dir_names.append(create_save_dir_name_from_config(_config))
+
         else:
-            raise
+            for a in alpha:
+                _config = deepcopy(config)
+                _config["sparsity_penalty"] = float(a)
 
-        main_generation(
-            model_path = p,
-            output_path = [
-                str((parent_path / "eval_embed.recon.jsonl")),
-                str((parent_path / "eval_embed.sparse.jsonl")),
-            ],
-            model_type=model_type
-        )
-        print("completed generation in:")
-        print(str((parent_path / "eval_embed.recon.jsonl")))
-        print(str((parent_path / "eval_embed.sparse.jsonl")))
+                hyperparameter_search_configs.append(_config)
+                save_model_dir_names.append(f"alpha_{a}_{config['lm_name']}")
+                #save_model_dir_names.append(create_save_dir_name_from_config(_config))
+    
+    return hyperparameter_search_configs, save_model_dir_names
 
 
 if __name__ == "__main__":
-    #main()
-    #main_generation()
-    main_multi_generation()
-    pass
+    parser = argparse.ArgumentParser(
+        description="train sae / generation."
+    )
+    parser.add_argument(
+        "--data_path",
+        help="path to data",
+        default=None
+    )
+    parser.add_argument(
+        "--save_dir",
+        help="path to save",
+        default=None
+    )
+    parser.add_argument(
+        "--model_config_fname",
+        help="path to config",
+        default=None
+    )
+    parser.add_argument(
+        "--training_config_fname",
+        help="path to config",
+        default=None
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=2048
+    )
+    parser.add_argument('--multi_config_parallel_training', action=argparse.BooleanOptionalAction)
+
+    parser.add_argument('--topk', nargs='+', default=[])
+    parser.add_argument('--alpha',nargs='+', default=[])
+    parser.add_argument('--dict_size_magifier', nargs='+', default=[])
+
+    args = parser.parse_args()
+    for k, value in args._get_kwargs():
+        if value is not None:
+            print(f"{k}: {value}")
+
+    if args.training_config_fname:
+        trainer_config = json.load(open(args.training_config_fname, 'r'))
+    else:
+        trainer_config = {
+            "save_steps": [2000, 4000, 6000],
+            "log_steps": 600,
+            "steps": 8000,
+            "verbose": True
+        }
+    print("load configs") 
+    hyperparameter_search_configs, save_model_dir_names = load_config(
+        args.model_config_fname,
+        args.save_dir,
+        dict_size_magifier=args.dict_size_magifier,
+        topk=args.topk,
+        alpha=args.alpha,
+        steps=trainer_config["steps"])
+
+    print("config:") 
+    print(hyperparameter_search_configs)
+    print("enter webdataset_main")
+    assert(not args.multi_config_parallel_training)
+    webdataset_main(
+        configs=hyperparameter_search_configs,
+        data_path=args.data_path,
+        save_dir=args.save_dir,
+        save_model_dir_names=save_model_dir_names,
+        batch_size=int(args.batch_size),
+        multi_config_parallel_training=args.multi_config_parallel_training,
+        trainer_config=trainer_config
+    )

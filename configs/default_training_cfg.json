@@ -1,0 +1,6 @@
+{
+    "save_steps": [1000, 2000, 4000, 5000, 6000],
+    "log_steps": 500,
+    "steps": 7324,
+    "verbose": true
+}

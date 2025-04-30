@@ -32,6 +32,8 @@ def combine_stat_in_directory(
 ):
 
     current_stat_file = json.load(open(stat_file, 'r'))
+    #print(stat_file)
+    #assert("ev_score" in current_stat_file)
     current_stat_file.pop('count_activation', None)
 
     sparse_score = 0
@@ -114,6 +116,8 @@ if __name__ == "__main__":
         #Path("/scratch/tltse/gated_vanilla_3mill_unpool_webdataset/")
         #Path("/scratch/tltse/extra_testing_3mill_unpool_webdataset/")
         Path("/scratch/tltse/v2_jumprelu_testing_3mill_unpool_webdataset/")
+        #Path("/scratch/tltse/v2_matryoshka_testing_3mill_unpool_webdataset/")
+
     ]:
         out_fname = train_checkpoint_dir / "full_train_stat.csv"
         print(f"processing in {str(train_checkpoint_dir)}")

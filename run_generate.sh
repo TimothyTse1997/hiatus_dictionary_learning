@@ -3,7 +3,7 @@
 #SBATCH --gpus-per-node=a100_3g.20gb:1
 #SBATCH --ntasks-per-node=8
 #SBATCH --mem=64G
-#SBATCH --time=2:00:00
+#SBATCH --time=20:00:00
 #SBATCH --account=def-lingjzhu
 
 module load StdEnv/2023

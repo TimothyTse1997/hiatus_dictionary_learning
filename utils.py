@@ -53,16 +53,19 @@ class SparseEmbeddingStatistics:
         return {"activation_per_embed": str(activation_per_embed)}
 
     def get_num_activation_for_most_embed(self, target_fraction=0.5):
+        try:
+            total_activation = np.sum(np.abs(self.all_embedding) > self.threshold)
+            target_size = int(total_activation * target_fraction)
 
-        total_activation = np.sum(np.abs(self.all_embedding) > self.threshold)
-        target_size = int(total_activation * target_fraction)
+            count_array = np.sum(np.abs(self.all_embedding) > self.threshold, axis=0)
+            count_array = np.sort(count_array)[::-1]
+            cumsum_count_array = np.cumsum(count_array)
+            freq_activation_count = np.where(cumsum_count_array > target_size)[0][0]
+            return {f"freq_activation_count_{target_fraction}": str(freq_activation_count)}
+        except Exception as e:
+            print(e)
+            return {f"freq_activation_count_{target_fraction}": str(0)}
 
-        count_array = np.sum(np.abs(self.all_embedding) > self.threshold, axis=0)
-        count_array = np.sort(count_array)[::-1]
-        cumsum_count_array = np.cumsum(count_array)
-        freq_activation_count = np.where(cumsum_count_array > target_size)[0][0]
-
-        return {f"freq_activation_count_{target_fraction}": str(freq_activation_count)}
     
     def get_num_dim_zero_activate(self):
         count_array = np.sum(np.abs(self.all_embedding) > self.threshold, axis=0)

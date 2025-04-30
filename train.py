@@ -173,7 +173,12 @@ def load_config(config_fname, save_dir, dict_size_magifier=[], topk=[], alpha=[]
         else:
             for a in alpha:
                 _config = deepcopy(config)
-                _config["sparsity_penalty"] = float(a)
+                if "sparsity_penalty" in _config.keys():
+                    _config["sparsity_penalty"] = float(a)
+                elif "l1_penalty" in _config.keys():
+                    _config["l1_penalty"] = float(a)
+                else:
+                    raise
 
                 hyperparameter_search_configs.append(_config)
                 save_model_dir_names.append(f"alpha_{a}_{config['lm_name']}")

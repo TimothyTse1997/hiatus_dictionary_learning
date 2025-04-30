@@ -4,7 +4,7 @@
         "dict_size": 25600,
         "lr": 7e-5,
         "device": "cuda",
-        "sparsity_penalty": 1,
+        "l1_penalty": 1,
         "lm_name": "mistral_gated",
         "layer": -1
     }

@@ -238,27 +238,74 @@ def run_single_checkpoint_generation(model_path, data_path, output_path):
     with open(stat_output_file, 'w') as f:
         json.dump(stat_result, f, indent=4)
 
+@torch.no_grad()
+def main_wds_large_sparse_dataset_generation():
+    shard_size = 400000  # Limit each shard to 40,000 instances
+    output_dir = "/scratch/tltse/jump_relu_3mill_unpool_alph_0.1/"  # Output
+    data_path = "/scratch/tltse/data/idiolect_embeddings/full/vectors_data/data-{00000..00030}.tar"
+    batch_size = 256
+    device = "cuda"
+    if not Path(output_dir).exists():
+        Path(output_dir).mkdir()
+
+    dataset = wds.DataPipeline(
+        wds.SimpleShardList(data_path),
+        wds.tarfile_to_samples(),
+        wds.decode("pill"),
+        wds.to_tuple("pth", "__key__", "txt"),
+        wds.batched(batch_size))
+
+    train_dataloader = wds.WebLoader(dataset, num_workers=1, batch_size=None)
+
+    ae = JumpReluAutoEncoder.from_pretrained("/project/def-lingjzhu/tltse/v2_jumprelu_testing_3mill_unpool_webdataset_split1/ae.pt")
+    _ = ae.eval().bfloat16()
+    _ = ae.to(device)
+
+    with wds.ShardWriter(f"{output_dir}/data-%05d.tar", maxcount=shard_size) as writer:
+        # Write data to the writer
+        start = time.time()
+        for step, (act, doc_ids, txts) in enumerate(tqdm(train_dataloader)):
+            act = act.to(device)
+            f_x =  ae.encode(act).bfloat16().cpu()
+
+            for batch_index, (doc_id, txt) in enumerate(zip(doc_ids, txts)):
+                sparse_embed = f_x[batch_index]
+                sparse_index = sparse_embed.nonzero(as_tuple=False).t()
+                sparse_value = sparse_embed[tuple(sparse_index)]
+
+                writer.write(
+                    {
+                        "txt": txt,
+                        "__key__": doc_id,
+                        "sparse_index.pth": sparse_index,
+                        "sparse_value.pth": sparse_value
+                    }
+                )
+            end = time.time()
+            if step == 0: print("batch size: ", len(doc_ids))
+            if step%1000 == 0: print(f"time per batch = {(end - start) / (step + 1)}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="train sae / generation."
-    )
-    parser.add_argument(
-        "--model_path",
-        help="path to model checkpoint",
-        default=None
-    )
-    parser.add_argument(
-        "--data_path",
-        help="path to eval data",
-        default="/project/def-lingjzhu/tltse/official_data/english.preds.jsonl"
-    )
-    parser.add_argument(
-        "--output_path",
-        help="path to generated output files",
-        nargs='+',
-        default=[]
-    )
+    main_wds_large_sparse_dataset_generation()
+    #parser = argparse.ArgumentParser(
+    #    description="train sae / generation."
+    #)
+    #parser.add_argument(
+    #    "--model_path",
+    #    help="path to model checkpoint",
+    #    default=None
+    #)
+    #parser.add_argument(
+    #    "--data_path",
+    #    help="path to eval data",
+    #    default="/project/def-lingjzhu/tltse/official_data/english.preds.jsonl"
+    #)
+    #parser.add_argument(
+    #    "--output_path",
+    #    help="path to generated output files",
+    #    nargs='+',
+    #    default=[]
+    #)
 
-    args = parser.parse_args()
-    run_single_checkpoint_generation(args.model_path, args.data_path, args.output_path)
+    #args = parser.parse_args()
+    #run_single_checkpoint_generation(args.model_path, args.data_path, args.output_path)

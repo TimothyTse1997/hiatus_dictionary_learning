@@ -107,11 +107,18 @@ def create_save_dir_name_from_config(config):
     elif "vanilla" in config["lm_name"]:
         return f"vanilla_{filter_config_infos(config)}"
 
-def load_config(config_fname, save_dir, dict_size_magifier=[], topk=[], alpha=[], steps=None):
+def load_config(
+    config_fname,
+    save_dir,
+    dict_size_magifier=[],
+    topk=[],
+    alpha=[],
+    steps=None,
+    skip_base=False
+):
     with open(config_fname, 'r') as f:
         configs = json.load(f)
     print("loaded config from file")
-    print(str(type(configs)))
 
     if not Path(save_dir).exists():
         Path(save_dir).mkdir()
@@ -184,6 +191,12 @@ def load_config(config_fname, save_dir, dict_size_magifier=[], topk=[], alpha=[]
                 save_model_dir_names.append(f"alpha_{a}_{config['lm_name']}")
                 #save_model_dir_names.append(create_save_dir_name_from_config(_config))
     
+    if skip_base:
+        print("number of configs before filtering: ", len(hyperparameter_search_configs))
+        hyperparameter_search_configs, save_model_dir_names = zip(*[(c, n) for c, n in zip(hyperparameter_search_configs, save_model_dir_names) if ("base" not in n)])
+        print("number of configs after filtering: ", len(hyperparameter_search_configs))
+        hyperparameter_search_configs, save_model_dir_names = list(hyperparameter_search_configs),list(save_model_dir_names)
+    assert(len(hyperparameter_search_configs) == len(save_model_dir_names))
     return hyperparameter_search_configs, save_model_dir_names
 
 
@@ -217,6 +230,7 @@ if __name__ == "__main__":
         default=2048
     )
     parser.add_argument('--multi_config_parallel_training', action=argparse.BooleanOptionalAction)
+    parser.add_argument('--skip_base', action=argparse.BooleanOptionalAction)
 
     parser.add_argument('--topk', nargs='+', default=[])
     parser.add_argument('--alpha',nargs='+', default=[])
@@ -237,13 +251,15 @@ if __name__ == "__main__":
             "verbose": True
         }
     print("load configs") 
+    #assert(args.skip_base)
     hyperparameter_search_configs, save_model_dir_names = load_config(
         args.model_config_fname,
         args.save_dir,
         dict_size_magifier=args.dict_size_magifier,
         topk=args.topk,
         alpha=args.alpha,
-        steps=trainer_config["steps"])
+        steps=trainer_config["steps"],
+        skip_base=args.skip_base)
 
     print("config:") 
     print(hyperparameter_search_configs)

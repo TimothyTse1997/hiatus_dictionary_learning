@@ -27,11 +27,28 @@ if __name__ == "__main__":
         "--eval_dataset",
         help="path to eval embed",
     )
+    parser.add_argument(
+        "--eval_token_dataset",
+        help="path to eval of token embed",
+        default="/scratch/tltse/data/english_preds_eval/data-{00000..00607}.tar"
+    )
+    parser.add_argument(
+        "--train_eval_datapath",
+        help="path to eval of EV and MSE in train domain (can use train data to replace it if no split is done)",
+        default="/scratch/tltse/data/idiolect_embeddings/full/vectors_data/data-{00293..00297}.tar"
+    )
+    parser.add_argument('--skip_intermediate', action=argparse.BooleanOptionalAction)
 
     args = parser.parse_args()
     all_generated_file = []
-
-    for model_path in Path(args.dict_learning_model_dir).glob("**/ae*.pt"):
+    if not args.skip_intermediate:
+        print("eval on intermediate steps")
+        checkpoint_paths = list(Path(args.dict_learning_model_dir).glob("**/ae*.pt"))
+    else:
+        print("eval ONLY on full training")
+        checkpoint_paths = list(Path(args.dict_learning_model_dir).glob("**/ae.pt"))
+    
+    for model_path in checkpoint_paths:
         parent_dir = model_path.parent
         if bool(re.search("ae\_[0-9]+\.pt", model_path.name)):
             parent_dir = model_path.parent.parent
@@ -48,7 +65,7 @@ if __name__ == "__main__":
 
             sparse_score_ourput_dir = parent_dir/ "ta1_sparse_score_result" 
             recon_score_ourput_dir = parent_dir/ "ta1_recon_score_result" 
-        if recon_output_file.exists() and len(list(recon_score_ourput_dir.glob("*"))):
+        if recon_output_file.exists() and len(list(recon_score_ourput_dir.glob("*"))) > 0:
             continue
         run_single_checkpoint_generation(
             str(model_path), 
@@ -86,7 +103,12 @@ if __name__ == "__main__":
     
     
     print("now run statistic for all data (explained varience)")
-    stat_main(Path(args.dict_learning_model_dir), "/scratch/tltse/data/english_preds_eval/data-{00000..00607}.tar")
+    stat_main(
+        save_dir=Path(args.dict_learning_model_dir),
+        data_path=args.eval_token_dataset,
+        skip_intermediate=args.skip_intermediate,
+        train_eval_datapath=args.train_eval_datapath
+    )
 
     print("remove generated files to free disk space")
     for f in all_generated_file:

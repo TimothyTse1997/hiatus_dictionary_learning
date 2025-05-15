@@ -115,7 +115,7 @@ if __name__ == "__main__":
         #Path("/scratch/tltse/matryoshka_3mill_unpool_webdataset/"),
         #Path("/scratch/tltse/gated_vanilla_3mill_unpool_webdataset/")
         #Path("/scratch/tltse/extra_testing_3mill_unpool_webdataset/")
-        Path("/scratch/tltse/v2_jumprelu_testing_3mill_unpool_webdataset/")
+        Path("/scratch/tltse/v2_jumprelu_testing_3mill_unpool_webdataset_split1/")
         #Path("/scratch/tltse/v2_matryoshka_testing_3mill_unpool_webdataset/")
 
     ]:

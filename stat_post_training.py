@@ -48,7 +48,11 @@ class SparseEmbeddingStatistics:
         count_array = np.sum(np.abs(self.all_embedding) > self.threshold, axis=0)
         count_array = np.sort(count_array)[::-1]
         cumsum_count_array = np.cumsum(count_array)
-        freq_activation_count = np.where(cumsum_count_array > target_size)[0][0]
+        try:
+            freq_activation_count = np.where(cumsum_count_array > target_size)[0][0]
+        except Exception as e:
+            print(e)
+            freq_activation_count = 0
 
         return {f"freq_activation_count_{target_fraction}": str(freq_activation_count)}
     
@@ -165,14 +169,74 @@ def load_model_from_dir(model_path):
 
 
 @torch.no_grad()
-def main(
-    save_dir = Path("/scratch/tltse/gated_vanilla_3mill_unpool_webdataset/"),
-    data_path = "/scratch/tltse/data/english_preds_eval/data-{00000..00607}.tar"
+def eval_on_webdataset(
+    data_path="/scratch/tltse/data/english_preds_eval/data-{00000..00607}.tar",
+    ae=None,
 ):
     device = 'cuda'
-    batch_size = 128
+    batch_size = 16384
 
-    all_file_paths = list(save_dir.glob("**/*.pt"))
+    dataset = wds.DataPipeline(
+        wds.SimpleShardList(data_path),
+        wds.tarfile_to_samples(),
+        wds.decode("pill"),
+        wds.to_tuple("pth", "__key__", "txt"),
+        wds.batched(batch_size))
+
+    train_dataloader = wds.WebLoader(dataset, num_workers=1, batch_size=None)
+
+    stat_result = {}
+
+    all_explained_variance = []
+    all_mse = []
+    all_non_zero_count = 0
+    total = 0
+
+    # to prevent OOM, we calculate variance_explain per batch
+    for step, (act, doc_ids, txts) in enumerate(tqdm(train_dataloader)):
+        act = act.to(device)
+        f_x = ae.encode(act)
+
+        x_hat =  ae.decode(f_x).bfloat16().cpu()
+        act = act.bfloat16().cpu()
+        f_x = f_x.bfloat16().cpu()
+
+        L0 = int(torch.where(f_x > 0)[0].size()[0])
+        all_non_zero_count += L0
+        total += act.shape[0]
+
+        diff = (act - x_hat)
+        mse = float((diff ** 2).mean().float())
+
+        all_mse.append(mse)
+
+        total_variance = torch.var(act, dim=0).sum()
+        residual_variance = torch.var(diff, dim=0).sum()
+
+        frac_variance_explained = 1 - residual_variance / total_variance
+        frac_variance_explained = float(frac_variance_explained.float())
+        all_explained_variance.append(frac_variance_explained)
+
+    stat_result['ev_score_train_set'] = sum(all_explained_variance) / len(all_explained_variance)
+    stat_result['mse_trainset'] = sum(all_mse) / len(all_mse)
+    stat_result['L0_trainset'] = all_non_zero_count / total
+    return stat_result
+
+
+@torch.no_grad()
+def main(
+    save_dir = Path("/scratch/tltse/gated_vanilla_3mill_unpool_webdataset/"),
+    data_path = "/scratch/tltse/data/english_preds_eval/data-{00000..00607}.tar",
+    skip_intermediate=False,
+    train_eval_datapath="/scratch/tltse/data/idiolect_embeddings/full/vectors_data/data-{00293..00297}.tar"
+):
+    device = 'cuda'
+    batch_size = 16384
+    if not skip_intermediate:
+        all_file_paths = list(save_dir.glob("**/*.pt"))
+    else:
+        all_file_paths = list(save_dir.glob("**/ae.pt"))
+
     dataset = wds.DataPipeline(
         wds.SimpleShardList(data_path),
         wds.tarfile_to_samples(),
@@ -196,33 +260,36 @@ def main(
             parent_path = parent_path.parent
             recon_path = str((parent_path / f"eval_embed_{checkpoint_step}.recon.jsonl"))
             sparse_path = str((parent_path / f"eval_embed_{checkpoint_step}.sparse.jsonl"))
-            assert(Path(recon_path).exists())
-            assert(Path(sparse_path).exists())
+            #assert(Path(recon_path).exists())
+            #assert(Path(sparse_path).exists())
 
         ae = load_model_from_dir(p)
         _ = ae.eval().bfloat16()
         _ = ae.to(device)       
 
+        print("start eval on train-domain result")
+        train_eval_result = eval_on_webdataset(
+            data_path=train_eval_datapath,
+            ae=ae)
+
         if checkpoint_step is None:
-            if not (parent_path / "sparse_stat.jsonl").exists():
-                stat_obj = SparseEmbeddingStatistics(sparse_path)
-                stat_result = stat_obj.run()
-            else:
-                #stat_result = json.load(
-                #    open(parent_path / "sparse_stat.jsonl", 'r')
-                #)
-                print(f"skip {str(parent_path)} base")
-                continue
+            stat_output_file = str((parent_path / "sparse_stat.jsonl"))
+            stat_output_file_bk = str((parent_path / "sparse_stat_bk.jsonl"))
         else:
-            if not (parent_path / "sparse_stat_{checkpoint_step}.jsonl").exists():
-                stat_obj = SparseEmbeddingStatistics(sparse_path)
-                stat_result = stat_obj.run()
-            else:
-                #stat_result = json.load(
-                #    open(parent_path / "sparse_stat_{checkpoint_step}.jsonl", 'r')
-                #)
-                print(f"skip: {str(parent_path)} {checkpoint_step}")
-                continue
+            stat_output_file = str((parent_path / f"sparse_stat_{checkpoint_step}.jsonl"))
+            stat_output_file_bk = str((parent_path / f"sparse_stat_{checkpoint_step}_bk.jsonl"))
+
+        #assert(Path(stat_output_file).exists())
+
+        if not Path(stat_output_file).exists():
+            stat_obj = SparseEmbeddingStatistics(sparse_path)
+            stat_result = stat_obj.run()
+        else:
+            stat_result = json.load(
+                open(Path(stat_output_file), 'r')
+            )
+            #print(f"skip {str(parent_path)} base")
+            #continue
 
         ev_obj = ExplainedVariance(recon_path)
         _, mse_score, cosine_similarity = ev_obj.run_ev()
@@ -231,10 +298,6 @@ def main(
         stat_result['cosine_distance_numpy'] = 1-cosine_similarity
 
         del ev_obj
-        if checkpoint_step is None:
-            stat_output_file = str((parent_path / "sparse_stat.jsonl"))
-        else:
-            stat_output_file = str((parent_path / f"sparse_stat_{checkpoint_step}.jsonl"))
 
         #all_emb, all_recon_emb = [], []
         all_explained_variance = []
@@ -246,20 +309,27 @@ def main(
             x_hat =  ae.decode(f_x).bfloat16().cpu()
             act = act.bfloat16().cpu()
 
+            diff = (act - x_hat)
+            mse = (diff ** 2).mean()
+
             total_variance = torch.var(act, dim=0).sum()
-            residual_variance = torch.var(act - x_hat, dim=0).sum()
+            residual_variance = torch.var(diff, dim=0).sum()
 
             frac_variance_explained = 1 - residual_variance / total_variance
             frac_variance_explained = float(frac_variance_explained.float())
             all_explained_variance.append(frac_variance_explained)
 
-        stat_result['ev_score'] = sum(all_explained_variance) / len(all_explained_variance)
+        stat_result['ev_score_eval_set_token'] = sum(all_explained_variance) / len(all_explained_variance)
 
+        stat_result.update(train_eval_result)
+
+        #with open(stat_output_file, 'w') as f:
         with open(stat_output_file, 'w') as f:
             print("STATE POST EVAL")
             print("SAVING STAT AT:", str(stat_output_file))
             print("model checkpoint:", str(p))
-            assert('ev_score' in stat_result.keys())
+            assert('ev_score_eval_set_token' in stat_result.keys())
+            assert('ev_score_train_set' in stat_result.keys())
             json.dump(stat_result, f, indent=4)
 
 if __name__ == "__main__":
